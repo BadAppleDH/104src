@@ -1,0 +1,423 @@
+				;	LIST	X,B
+				;	CSEG
+	ORG	2400H
+	NAME 	DISPLAY
+	TITLE	'TT5 Display Module'
+
+	GLOBAL		DISPOLL,DISINIT
+	GLOBAL		DISPLAY,DISPLAYC,DISPLAYN
+;	GLOBAL		RCNTA,WELDADV,FLAGS1,WELDRST,WELDDSP
+	
+;	EXTRN		MODREG,FG1
+
+
+X2M		EQU	0A300H		;Beginning of Display module memory
+
+RCNT3		EQU	X2M+1		;Most significant packed BCD digit
+RCNT2		EQU	X2M+2
+RCNT1		EQU	X2M+3
+RCNT		EQU	X2M+4		;Least significant packed BCD digit
+
+AN		EQU	RCNT+1		;Beginning of ASCII data storage
+
+RCNT8A		EQU	AN+1		;Most significant ASCII data
+RCNT7A		EQU	AN+2
+RCNT6A		EQU	AN+3
+RCNT5A		EQU	AN+4
+RCNT4A		EQU	AN+5
+RCNT3A		EQU	AN+6
+RCNT2A		EQU	AN+7
+RCNTA		EQU	AN+8		;Least significant ASCII data
+RCNT0		EQU	AN+9		;RAM Nop
+
+X3M		EQU	RCNT0+1		;Beginning of module 3 memory
+LINE		EQU	X3M+1		;Line #
+COL		EQU	X3M+2		;Column #
+XCTR		EQU	X3M+3		;Character counter
+FLAG2		EQU	X3M+4		;Flag Register
+					;Bit 0  Transmit Routine Running
+					;Bit 1  Transmit Start Request
+
+FLAGS1		EQU	FLAG2+1		;Share with TT5 module
+					;Bit 0  Reset the Welder Running count.
+
+
+D3		EQU	FLAGS1+2	;Beginning of two byte pointers
+JUMP1		EQU	D3+2		;Transmit routine jump memory
+XPOINT		EQU	D3+4		;Character pointer
+
+
+BUFSTART	EQU	0A400H		;48 byte RAM buffer for TT5 displays
+					
+
+
+;******   Macro Definitions   ******
+
+WRITE		MACRO	#X1,#X2,#X3,#X4
+
+		LD	HL,W#$YM
+		IFC	#X4,C
+		CALL	DISPLAYC	;Display with clear
+		ELSE
+		CALL	DISPLAY		;Regular display.
+		ENDC
+		JP	W2#$YM
+W#$YM		IFC	#X3,C
+		DB	12-((W2#$YM-W3#$YM)/2)+((#X2-1)*24)	;Centered number
+		ELSE
+		DB	(#X3-1)+((#X2-1)*24)	;Column Number (1-24)
+		ENDC
+W3#$YM		DEFM	'#X1'
+W2#$YM		NOP
+		ENDM
+
+
+
+NUMOUT		MACRO	#NW1,#NW2,#NW3
+
+		LD	HL,NW#$YM
+		CALL	DISPLAYN	;Display number
+		JP	NW2#$YM
+
+NW#$YM		IFC	#X3,C
+		DB	12-((NW2#$YM-NW3#$YM)/2)+((#NW2-1)*24)	;Centered number
+		ELSE
+		DB	(#NW3-1)+((#NW2-1)*24)	;Column Number (1-24)
+		ENDC
+
+NW3#$YM		DW	#NW1-7		;Begin with most significant byte.
+NW2#$YM		NOP
+		ENDM
+
+
+		EJEC
+
+DISPOLL		CALL	XMIT		;Display output routine
+		RET
+
+DISINIT		LD	A,0
+		LD	(FLAG2),A
+		LD	(RCNT8A),A
+		LD	(RCNT7A),A
+		LD	(RCNT6A),A
+		LD	(RCNT5A),A
+		LD	(RCNT4A),A
+		LD	(RCNT3A),A
+		LD	(RCNT2A),A
+		LD	(RCNTA),A
+		LD	(RCNT0),A		;Mark the end of count with nop
+		RET
+
+WELDRST		LD	A,0		;Reset the welder running count
+		LD	(FLAG2),A
+		LD	(RCNT3),A
+		LD	(RCNT2),A
+		LD	(RCNT1),A
+		LD	(RCNT),A
+		JP	WELDDSP		;Display the new reset count
+
+
+WELDADV		LD	HL,RCNT		;BCD count
+		CALL	TOTAL
+		RET
+
+
+WELDDSP		BIT	0,(IX+0DH)	;Is an error message displayed?
+		RET	NZ		;Do not write over an error message with a count
+
+	;	LD	A,(MODREG)
+	;	BIT	1,A		;Check if in run mode
+	;	RET	Z		;Do not display count if not in run.
+		
+	;	LD	A,(FG1)
+	;	BIT	1,A		;Check if a new mode is being selected
+	;	RET	NZ		;Do not display count if keyboard is being used.
+
+		LD	HL,RCNT		;Conversion to ASCII, Packed BCD
+		LD	DE,RCNTA	;ASCII Value
+		CALL	CONVERT
+		LD	HL,RCNTA	;Zero suppression 
+		CALL	ZDISP
+		WRITE	'PARTS COUNT',1,1,C
+		NUMOUT	RCNTA,1,13	;Number output 
+		RET
+
+
+
+
+;****************************************************************************
+;*
+;*				ZDISP Routine
+;*
+;*	This routine must have HL loaded with the RCNTA before starting
+;*
+;*	The data which this routine looks at will already be in ASCII.
+;*
+;*	Purpose of this routine is to provide leading zero suppression
+;*	on displayed numbers.
+;*
+;****************************************************************************
+
+
+ZDISP		LD	BC,7
+		SCF
+		CCF			;Be sure carry flag is reset.
+		SBC	HL,BC		;HL will now be pointing at the MSD
+		LD	B,7		;Change up to seven bytes.
+ZLOOP		LD	A,(HL)
+		CP	30H		;Check if the byte is a zero
+		RET	NZ		;Return out of loop for nonon zero numbers.
+
+		LD	A,20H		;Replace the zero with a blank
+		LD	(HL),A
+		INC	HL		;Advance to the next least significant digit.
+		DJNZ	ZLOOP
+		RET			;Return after checking all eight bytes.
+
+
+
+
+;****************************************************************************
+;*
+;*				CONVERT Routine
+;*
+;*	This routine will convert four bytes of packed BCD data into
+;*	eight bytes of ASCII data.
+;*
+;*	HL must be loaded with the least significant BCD byte location
+;*
+;*	DE must be loaded with the least significant ASCII byte location
+;*
+;*	NOTE:	Least significant digit should be the highest addresses.
+;*
+;*
+;****************************************************************************
+
+
+
+
+CONVERT		LD	BC,0402H	;Constant
+STAT2		LD	A,(HL)		;Get the BCD value.
+STAT3		PUSH	AF		;Temporaily store this value.
+		AND	00001111B	;Mask off the unused positions.
+		ADD	A,030H		;Adjust BCD data to Ascii.
+		LD	(DE),A		;Output the data to screen.
+		POP	AF		;Restore the value to get the other
+		RRA			;BCD number.
+		RRA
+		RRA
+		RRA			;Rotate A to right four times.
+		DEC	DE		;Move screen location.
+		DEC	C		;Loop twice to get both BCD values.
+		JP	NZ,STAT3	;Jump if not looped twice.
+		LD	C,2
+		DEC	HL		;Get next BCD digit.
+		DJNZ	STAT2		;Jump if four memory locations
+		RET			;have not been used.
+
+
+	
+
+
+
+;****************************************************************************
+;*
+;*	 		      TOTAL Routine
+;*
+;*	This routine advances a Packed BCD count by one when called.
+;*
+;*	The routine works with four byte packed BCD numbers
+;*
+;*	Before calling load HL with the least significant byte address 
+;*
+;*	NOTE:	Least significant digit should be the highest addresses.
+;*
+;****************************************************************************
+
+
+TOTAL		LD      B,04H           ;USES 4 CONSECUTIVE MEMORY LOCATION
+		SCF                     ;SET CARRY FLAG TO 1
+ADDHERE		LD      A,(HL)          ;STARTING WITH LSD LOAD THE VALUE INTO THE ACC
+		ADC     A,000H          ;ADDS 0 AND THE CARRY FLAG TO ACCUM
+		DAA                     ;DECIMAL ADJUST THE ACCUM
+		LD      (HL),A          ;STORE THE RESULT BACK INTO MEMORY
+		DEC     HL              ;POINTS TO NEXT DIGITS
+		DJNZ    ADDHERE         ;DEC B JUMP IF NOT ZERO .. DOES NOT EFFECT THE CARRY FLAG
+		RET                     ;RETURN TO CALLING ROUTINE
+
+
+
+HTOTAL		LD	A,1
+		ADD	A,(HL)		;Increment the hex counter by one.
+		LD	(HL),A		;Store the new number.
+		JP	NC,C_TEST	;Jump if the most significant byte
+		INC	HL		;does not need to be incremented.
+		INC	(HL)		;Increment the most significant byte.
+		DEC	HL
+C_TEST		NOP
+		RET
+
+
+
+Q_STOP		;RESFLAG	65
+		LD	C,(HL)		;Get the actual running count.
+		INC	HL
+		LD	B,(HL)
+		LD	H,D
+		LD	L,E
+		LD	A,(HL)		;Get the actual programmed stop count.
+		INC	HL
+		LD	H,(HL)
+		LD	L,A
+		AND	A		;Clear the carry bit.
+		SBC	HL,BC		;Subtract the current count from the 
+		JP	Z,STOP1		;Check if the counts are equal.
+		JP	P,OK_RUN	;Jump if the current count is less
+					;than the desired count.
+STOP1		;SETFLAG	65
+OK_RUN		RET
+	
+
+
+
+
+DISPLAYC	PUSH	HL		;Save message pointer
+		CALL	CLRBUFF		;First Clear the display buffer
+		POP	HL		;Retrieve pointer
+
+DISPLAY		CALL	DSUB
+DLOOP		LD	A,(HL)
+		CP	0
+		JP	Z,LOOPEND	;Loop continues until a NOP is found
+		LDI			;(DE) < (HL), HL & DE Inc., BC Dec.
+		JP	DLOOP
+
+LOOPEND		LD	A,(FLAG2)
+		SET	1,A		;Set the Transmit Request flag
+		LD	(FLAG2),A
+		RET
+
+
+DSUB		LD	D,0
+		LD	E,(HL)		;Message offset
+		INC	HL		;Now pointing at the beginning of message.
+		PUSH	HL		;Temporarily save
+		SCF
+		CCF			;Be sure carry flag is reset
+		LD	HL,BUFSTART	;Beginning of RAM buffer
+		ADC	HL,DE		;Add offset
+		LD	D,H	
+		LD	E,L		;DE contains destination address
+		POP	HL		;Retrieve source address
+		RET
+
+
+DISPLAYN	CALL	DSUB
+		LD	C,(HL)
+		INC	HL
+		LD	B,(HL)
+		LD	H,B
+		LD	L,C
+		JP	DLOOP
+
+
+CLRBUFF		LD	A,20H		;Space character
+		LD	B,48		;Clear all 48 RAM buffer locations
+		LD	HL,BUFSTART	;Begining address of RAM buffer
+CLOOP		LD	(HL),A
+		INC	HL
+		DJNZ	CLOOP		;Loop until all 48 RAM locations
+		RET			;have been loaded
+
+
+
+XMIT		LD	A,(FLAG2)
+		BIT	0,A		;Check if transmit sequence in progress.
+		JP	NZ,XJUMP	;Jump if in progress.
+
+		BIT	1,A		;Check if a transmit sequence is requested.
+		RET	Z		;Return for no request
+
+		SET	0,A		;Set the transmit sequence running flag
+		RES	1,A		;Reset the transmit request bit
+		LD	(FLAG2),A
+
+		LD	A,48		;Always output 48 characters
+		LD	(XCTR),A	;Store
+		LD	A,20H		;Line #1
+		LD	(LINE),A	;Store
+		LD	A,20H		;Column #1
+		LD	(COL),A		;Store
+		LD	HL,BUFSTART
+		LD	(XPOINT),HL	;Beginning of message address
+
+		LD	HL,ESC1		;First step of escape sequence
+		LD	(JUMP1),HL
+
+
+
+XJUMP		LD	HL,(JUMP1)	;Jump to stored address.
+		JP	(HL)
+
+
+ESC1		IN	A,(0F5H)	;Check if transmit buffer is ready for data
+		BIT	2,A		;High if buffer ready
+		RET	Z		;Return if busy
+
+		LD	A,1BH		;Escape code command.
+		OUT	(0F4H),A
+		LD	HL,ESC2		;Step 2 of escape sequence
+		LD	(JUMP1),HL
+
+ESC2		IN	A,(0F5H)	;Check if transmit buffer is ready for data
+		BIT	2,A		;High if buffer ready
+		RET	Z		;Return if busy
+
+		LD	A,'G'		;Second step escape sequence
+		OUT	(0F4H),A	;Output
+		LD	HL,ESC3		;Prepair to output line number
+		LD	(JUMP1),HL
+	
+ESC3		IN	A,(0F5H)	;Check if transmit buffer is ready for data
+		BIT	2,A		;High if buffer ready
+		RET	Z		;Return if busy
+
+		LD	A,(LINE)	;Get cursor line number
+		OUT	(0F4H),A	;Output line number
+		LD	HL,ESC4		;Prepair to output column number
+		LD	(JUMP1),HL
+
+ESC4		IN	A,(0F5H)	;Check if transmit buffer is ready for data
+		BIT	2,A		;High if buffer ready
+		RET	Z		;Return if busy
+
+		LD	A,(COL)		;Get cursor column number
+		OUT	(0F4H),A	;Output
+		LD	HL,QBUF		;Normal transmit loop
+		LD	(JUMP1),HL
+	
+
+
+QBUF		IN	A,(0F5H)	;Check if transmit buffer is ready for data
+		BIT	2,A		;High if buffer ready
+		RET	Z		;Return if busy
+
+		LD	HL,(XPOINT)	;Get character position
+		LD	A,(HL)		;Get character to transmit
+		OUT	(0F4H),A	;Transmit the character
+
+		INC	HL		;Increment character pointer		
+		LD	(XPOINT),HL
+		LD	A,(XCTR)
+		DEC	A		;Decrement the character counter
+		LD	(XCTR),A
+		JP	NZ,QBUF		;Transmit another if not zero
+
+		LD	A,(FLAG2)
+		RES	0,A		;Reset the transmit sequence running flag.
+		LD	(FLAG2),A
+		RET
+
+
+
+
